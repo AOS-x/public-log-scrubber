@@ -204,6 +204,15 @@ versions, Dependabot, documented releases, and private vulnerability reports.
 See [MAINTAINING.md](MAINTAINING.md) for the operating workflow and the
 specific ways Codex/API credits support it.
 
+- Pull requests receive focused review and regression tests.
+- Issues are triaged for false positives, missed credential shapes, and
+  portability problems.
+- GitHub Actions runs the test suite across supported Python versions.
+- Dependabot watches packaging metadata and GitHub Actions.
+- Releases are tagged from tested commits and documented in CHANGELOG.md.
+- Security reports should use GitHub Private Vulnerability Reporting, not a
+  public issue.
+
 ## Development
 
 ~~~bash
