@@ -91,11 +91,6 @@ small by design so review and release work can stay responsive:
 - Security reports should use GitHub Private Vulnerability Reporting, not a
   public issue.
 
-Codex/API credits directly support the maintenance loop: reviewing pull
-requests, reproducing and triaging issues, expanding redaction tests,
-checking release diffs, updating dependencies and Actions, and performing
-security-focused regression reviews without sending log input to a remote
-service.
 
 ## Development
 
