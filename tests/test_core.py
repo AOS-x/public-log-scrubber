@@ -48,6 +48,20 @@ class ScrubJsonTests(unittest.TestCase):
         self.assertEqual(result.value, value)
         self.assertEqual(result.replacements, 0)
 
+    def test_unicode_custom_keys_only_redact_the_configured_key(self):
+        value = {"كلمة_المرور": "hidden", "الاسم": "keep", "名": "keep"}
+        result = scrub_json(value, extra_keys=["كلمة_المرور"])
+        self.assertEqual(result.value["كلمة_المرور"], DEFAULT_REPLACEMENT)
+        self.assertEqual(result.value["الاسم"], "keep")
+        self.assertEqual(result.value["名"], "keep")
+        self.assertEqual(result.replacements, 1)
+
+    def test_punctuation_only_custom_keys_are_rejected(self):
+        with self.assertRaises(ValueError):
+            ScrubPolicy(extra_sensitive_keys=("!!!",))
+        with self.assertRaises(ValueError):
+            scrub_text("!!!=hidden", extra_keys=("!!!",))
+
 
 class ScrubTextTests(unittest.TestCase):
     def test_common_assignments_and_tokens_are_replaced(self):
@@ -74,6 +88,13 @@ class ScrubTextTests(unittest.TestCase):
         )
         self.assertEqual(result.value, "employee_id=[REDACTED] message=keep")
         self.assertEqual(result.replacements, 1)
+
+    def test_assignments_preserve_quotes_and_punctuation(self):
+        result = scrub_text('password="hidden", next=ok; token=keep')
+        self.assertEqual(
+            result.value,
+            'password="[REDACTED]", next=ok; token=[REDACTED]',
+        )
 
     def test_url_query_parameters_preserve_other_parameters(self):
         result = scrub_text(
@@ -138,6 +159,25 @@ class ScrubTextTests(unittest.TestCase):
         replacement = r"\\1-$&"
         result = scrub_text("password=hidden", replacement=replacement)
         self.assertEqual(result.value, f"password={replacement}")
+
+    def test_scrubbing_is_idempotent(self):
+        samples = (
+            "password=hidden",
+            "Authorization: Bearer abcdefgh",
+            "GET /events?token=hidden&next=ok",
+            'password="hidden"',
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                first = scrub_text(sample)
+                second = scrub_text(first.value)
+                self.assertEqual(second.value, first.value)
+                self.assertEqual(second.replacements, 0)
+                self.assertEqual(dict(second.rule_counts), {})
+
+    def test_invalid_policy_type_is_rejected(self):
+        with self.assertRaises(TypeError):
+            scrub_text("password=hidden", policy="not-a-policy")  # type: ignore[arg-type]
 
     def test_policy_rejects_unknown_rules_and_non_string_keys(self):
         with self.assertRaises((ValueError, TypeError)):

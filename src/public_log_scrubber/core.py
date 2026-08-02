@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -73,8 +74,6 @@ KNOWN_RULE_IDS = frozenset(
     }
 )
 
-_KEY_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
-
 # URL parameter names are kept explicit so a generic parameter such as
 # ``id`` is never treated as a credential merely because it is configurable.
 _DEFAULT_URL_PARAMETER_NAMES = (
@@ -108,7 +107,8 @@ _DEFAULT_ASSIGNMENT_KEY_PATTERN = (
 )
 
 _ASSIGNMENT_VALUE = (
-    r'(?:(?:"[^"]*")|(?:\'[^\']*\')|(?:Bearer|Basic)\s+\S+|'
+    r'(?:(?:"[^"]*")|(?:\'[^\']*\')|'
+    r"(?:Bearer|Basic)\s+[^\s,;}\]&#]+|"
     r"[^\s,;}\]&#]+)"
 )
 
@@ -175,6 +175,8 @@ class ScrubPolicy:
             ) from exc
         if any(not isinstance(key, str) or not key.strip() for key in extra_keys):
             raise ValueError("extra_sensitive_keys must contain non-empty strings")
+        if any(not _normalize_key(key) for key in extra_keys):
+            raise ValueError("extra_sensitive_keys must contain usable key names")
         object.__setattr__(self, "extra_sensitive_keys", extra_keys)
 
         if isinstance(self.disabled_rules, str):
@@ -205,13 +207,17 @@ class ScrubResult:
 
 
 def _normalize_key(key: Any) -> str:
-    return _KEY_SEPARATOR_RE.sub("", str(key).lower())
+    normalized = unicodedata.normalize("NFKC", str(key)).casefold()
+    return "".join(character for character in normalized if character.isalnum())
 
 
 def _legacy_extra_keys(extra_keys: Iterable[str]) -> tuple[str, ...]:
     if isinstance(extra_keys, str):
         extra_keys = (extra_keys,)
-    return tuple(str(key).strip() for key in extra_keys if str(key).strip())
+    keys = tuple(str(key).strip() for key in extra_keys if str(key).strip())
+    if any(not _normalize_key(key) for key in keys):
+        raise ValueError("extra_keys must contain usable key names")
+    return keys
 
 
 def _resolve_policy(
@@ -219,6 +225,8 @@ def _resolve_policy(
     extra_keys: Iterable[str],
     replacement: str,
 ) -> ScrubPolicy:
+    if policy is not None and not isinstance(policy, ScrubPolicy):
+        raise TypeError("policy must be a ScrubPolicy instance")
     legacy_keys = _legacy_extra_keys(extra_keys)
     if policy is not None and not legacy_keys and replacement == DEFAULT_REPLACEMENT:
         return policy
@@ -227,9 +235,6 @@ def _resolve_policy(
             replacement=replacement,
             extra_sensitive_keys=legacy_keys,
         )
-
-    if not isinstance(policy, ScrubPolicy):
-        raise TypeError("policy must be a ScrubPolicy instance")
 
     # The legacy default is indistinguishable from an omitted argument, which
     # lets a policy file control the replacement while preserving old callers.
@@ -305,6 +310,9 @@ def _scrub_json_value(
                     else RULE_JSON_SENSITIVE_KEY
                 )
                 if rule_id not in policy.disabled_rules:
+                    if child == policy.replacement:
+                        scrubbed[key] = child
+                        continue
                     scrubbed[key] = policy.replacement
                     _increment(counts, rule_id)
                     continue
@@ -375,7 +383,12 @@ def _url_parameter_pattern(extra_keys: Iterable[str]) -> re.Pattern[str]:
 
 
 def _replace_assignment(match: re.Match[str], replacement: str) -> str:
-    return f"{match.group('key_name')}{match.group('separator')}{replacement}"
+    value = match.group("value")
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        replacement_value = f"{value[0]}{replacement}{value[-1]}"
+    else:
+        replacement_value = replacement
+    return f"{match.group('key_name')}{match.group('separator')}{replacement_value}"
 
 
 def _replace_prefixed(match: re.Match[str], replacement: str) -> str:
@@ -392,10 +405,37 @@ def _substitute(
 ) -> str:
     if rule_id in policy.disabled_rules:
         return text
-    text, count = pattern.subn(replacement, text)
+    count = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal count
+        value = replacement(match)
+        if value != match.group(0):
+            count += 1
+        return value
+
+    scrubbed = pattern.sub(replace, text)
     if count:
         _increment(counts, rule_id, count)
-    return text
+    return scrubbed
+
+
+def _replacement_starts_at(text: str, start: int, replacement: str) -> bool:
+    if not replacement or not text.startswith(replacement, start):
+        return False
+    end = start + len(replacement)
+    return end == len(text) or text[end] in "\r\n\t ,;:]}>&)\"'"
+
+
+def _is_redacted_value(value: str, replacement: str) -> bool:
+    if value == replacement:
+        return True
+    return (
+        len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in "\"'"
+        and value[1:-1] == replacement
+    )
 
 
 def _scrub_text_with_policy(text: str, policy: ScrubPolicy) -> ScrubResult:
@@ -405,23 +445,34 @@ def _scrub_text_with_policy(text: str, policy: ScrubPolicy) -> ScrubResult:
         () if RULE_CUSTOM_KEY in policy.disabled_rules else policy.extra_sensitive_keys
     )
 
+    def replace_url(match: re.Match[str]) -> str:
+        if match.group("value") == policy.replacement:
+            return match.group(0)
+        return _replace_prefixed(match, policy.replacement)
+
     scrubbed = _substitute(
         scrubbed,
         _url_parameter_pattern(custom_keys),
-        lambda match: _replace_prefixed(match, policy.replacement),
+        replace_url,
         RULE_URL_PARAMETER,
         policy,
         counts,
     )
 
     assignment_pattern = _assignment_pattern(custom_keys)
+    custom_key_set = _custom_key_set(policy)
 
     def replace_assignment(match: re.Match[str]) -> str:
+        if _is_redacted_value(match.group("value"), policy.replacement) or (
+            _replacement_starts_at(
+                match.string, match.start("value"), policy.replacement
+            )
+        ):
+            return match.group(0)
         normalized = _normalize_key(match.group("key_name"))
         rule_id = (
             RULE_CUSTOM_KEY
-            if normalized in _custom_key_set(policy)
-            and normalized not in DEFAULT_SENSITIVE_KEYS
+            if normalized in custom_key_set and normalized not in DEFAULT_SENSITIVE_KEYS
             else RULE_ASSIGNMENT
         )
         if rule_id in policy.disabled_rules:
@@ -441,11 +492,20 @@ def _scrub_text_with_policy(text: str, policy: ScrubPolicy) -> ScrubResult:
             RULE_BASIC_CREDENTIALS,
             RULE_DATABASE_URL_PASSWORD,
         ):
-            replacement_function = lambda match: _replace_prefixed(
-                match, policy.replacement
-            )
+
+            def replacement_function(match: re.Match[str]) -> str:
+                if "value" in match.groupdict() and _is_redacted_value(
+                    match.group("value"), policy.replacement
+                ):
+                    return match.group(0)
+                return _replace_prefixed(match, policy.replacement)
         else:
-            replacement_function = lambda _match: policy.replacement
+
+            def replacement_function(match: re.Match[str]) -> str:
+                if match.group(0) == policy.replacement:
+                    return match.group(0)
+                return policy.replacement
+
         scrubbed = _substitute(
             scrubbed,
             pattern,

@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 The format follows the principles of Keep a Changelog, and releases use
 semantic versioning.
 
+## [0.2.1] - 2026-08-02
+
+### Fixed
+
+- Preserve Unicode custom-key matching without treating every non-Latin key as
+  the same key.
+- Make repeated scrubbing idempotent, including the default replacement marker.
+- Preserve assignment quotes and punctuation while redacting values.
+- Validate policy types before applying a policy.
+- Stage output and report files before committing either destination.
+- Return a safe operational error for recursion failures.
+
 ## [0.2.0] - 2026-08-02
 
 ### Added

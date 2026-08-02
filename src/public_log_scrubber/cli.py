@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
 
@@ -137,32 +137,71 @@ def _input_handle(path: str, stdin: TextIO) -> Iterator[TextIO]:
         yield handle
 
 
-@contextmanager
-def _atomic_writer(path: str, force: bool) -> Iterator[TextIO]:
-    destination = Path(path)
-    if destination.exists() and not force:
-        raise FileExistsError(
-            f"refusing to overwrite {destination}; use --force to replace it"
-        )
+class _StagedFile:
+    """Stage one destination and commit it only after all work succeeds."""
 
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        dir=str(destination.parent),
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-    )
-    os.close(file_descriptor)
-    try:
-        with open(temporary_name, "w", encoding="utf-8", newline="") as handle:
-            yield handle
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, destination)
-    except BaseException:
+    def __init__(self, path: str, force: bool) -> None:
+        self.destination = Path(path)
+        self.force = force
+        self.temporary_name: str | None = None
+        self.handle: TextIO | None = None
+
+    def open(self) -> TextIO:
+        if self.destination.exists() and not self.force:
+            raise FileExistsError(
+                f"refusing to overwrite {self.destination}; use --force to replace it"
+            )
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            dir=str(self.destination.parent),
+            prefix=f".{self.destination.name}.",
+            suffix=".tmp",
+        )
+        self.temporary_name = temporary_name
         try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
-        raise
+            self.handle = os.fdopen(
+                file_descriptor,
+                "w",
+                encoding="utf-8",
+                newline="",
+            )
+        except BaseException:
+            os.close(file_descriptor)
+            self.cleanup()
+            raise
+        return self.handle
+
+    def finish(self) -> None:
+        if self.handle is None:
+            return
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+        self.handle.close()
+        self.handle = None
+
+    def commit(self) -> None:
+        self.finish()
+        if self.temporary_name is None:
+            return
+        if self.destination.exists() and not self.force:
+            raise FileExistsError(
+                f"refusing to overwrite {self.destination}; use --force to replace it"
+            )
+        os.replace(self.temporary_name, self.destination)
+        self.temporary_name = None
+
+    def cleanup(self) -> None:
+        if self.handle is not None:
+            try:
+                self.handle.close()
+            finally:
+                self.handle = None
+        if self.temporary_name is not None:
+            try:
+                os.unlink(self.temporary_name)
+            except FileNotFoundError:
+                pass
+            finally:
+                self.temporary_name = None
 
 
 def _scrub_complete(raw: str, input_format: str, policy: ScrubPolicy) -> ScrubResult:
@@ -208,17 +247,20 @@ def _validate_paths(args: argparse.Namespace) -> None:
             if path and Path(path).resolve() == input_path:
                 raise ValueError(f"{label} cannot overwrite the input file")
 
+    for path in paths:
+        if Path(path).exists() and not args.force:
+            raise FileExistsError(
+                f"refusing to overwrite {Path(path)}; use --force to replace it"
+            )
 
-def _write_report(
-    path: str, force: bool, replacements: int, counts: dict[str, int]
-) -> None:
+
+def _write_report(handle: TextIO, replacements: int, counts: dict[str, int]) -> None:
     report = {
         "replacements": replacements,
         "rule_counts": {rule: counts[rule] for rule in sorted(counts)},
     }
-    with _atomic_writer(path, force) as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
+    json.dump(report, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -226,47 +268,62 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _validate_paths(args)
         policy = _effective_policy(args)
-
-        output_context = (
-            nullcontext(None)
-            if args.check or args.output is None
-            else _atomic_writer(args.output, args.force)
-        )
         total_counts: dict[str, int] = {}
         total_replacements = 0
 
-        with (
-            _input_handle(args.path, sys.stdin) as input_handle,
-            output_context as output_handle,
-        ):
-            if args.format in ("text", "jsonl"):
-                results = scrub_lines(
-                    input_handle,
-                    format=args.format,
-                    policy=policy,
-                )
-                for result in results:
-                    total_replacements += result.replacements
+        output_stage = (
+            _StagedFile(args.output, args.force)
+            if args.output and not args.check
+            else None
+        )
+        report_stage = _StagedFile(args.report, args.force) if args.report else None
+        try:
+            output_handle = output_stage.open() if output_stage else None
+            report_handle = report_stage.open() if report_stage else None
+            with _input_handle(args.path, sys.stdin) as input_handle:
+                if args.format in ("text", "jsonl"):
+                    results = scrub_lines(
+                        input_handle,
+                        format=args.format,
+                        policy=policy,
+                    )
+                    for result in results:
+                        total_replacements += result.replacements
+                        _add_counts(total_counts, result)
+                        if not args.check:
+                            destination = output_handle or sys.stdout
+                            destination.write(result.value)
+                else:
+                    result = _scrub_complete(input_handle.read(), args.format, policy)
+                    total_replacements = result.replacements
                     _add_counts(total_counts, result)
                     if not args.check:
                         destination = output_handle or sys.stdout
                         destination.write(result.value)
-            else:
-                result = _scrub_complete(input_handle.read(), args.format, policy)
-                total_replacements = result.replacements
-                _add_counts(total_counts, result)
-                if not args.check:
-                    destination = output_handle or sys.stdout
-                    destination.write(result.value)
 
-        if args.report:
-            _write_report(
-                args.report,
-                args.force,
-                total_replacements,
-                total_counts,
-            )
-    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            if output_stage:
+                output_stage.finish()
+            if report_stage and report_handle:
+                _write_report(report_handle, total_replacements, total_counts)
+                report_stage.finish()
+            if report_stage:
+                report_stage.commit()
+            if output_stage:
+                output_stage.commit()
+        except BaseException:
+            if output_stage:
+                output_stage.cleanup()
+            if report_stage:
+                report_stage.cleanup()
+            raise
+    except (
+        OSError,
+        UnicodeError,
+        TypeError,
+        ValueError,
+        RecursionError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"log-scrub: {exc}", file=sys.stderr)
         return 2
 

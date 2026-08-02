@@ -94,6 +94,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual(report_value["rule_counts"], {"custom-key": 1})
             self.assertNotIn("secret", report.read_text(encoding="utf-8"))
 
+    def test_existing_report_does_not_commit_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "safe.log"
+            report = root / "report.json"
+            report.write_text("keep", encoding="utf-8")
+            stderr = io.StringIO()
+            with (
+                patch("sys.stdin", io.StringIO("password=hidden\n")),
+                patch("sys.stderr", stderr),
+            ):
+                exit_code = main(
+                    [
+                        "--format",
+                        "text",
+                        "--output",
+                        str(output),
+                        "--report",
+                        str(report),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertFalse(output.exists())
+            self.assertEqual(report.read_text(encoding="utf-8"), "keep")
+            self.assertIn("refusing to overwrite", stderr.getvalue())
+
     def test_output_refuses_overwrite_without_force(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "safe.log"
