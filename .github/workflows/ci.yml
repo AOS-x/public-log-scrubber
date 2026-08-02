@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -23,8 +23,61 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package
-        run: python -m pip install --editable .
+        run: python -m pip install --upgrade pip && python -m pip install --editable ".[dev]"
       - name: Run tests
         run: python -m unittest discover -s tests -v
       - name: Compile package
         run: python -m compileall -q src
+
+  quality:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install development tools
+        run: python -m pip install --upgrade pip && python -m pip install ".[dev]"
+      - name: Check formatting
+        run: python -m ruff format --check .
+      - name: Lint
+        run: python -m ruff check .
+      - name: Type check
+        run: python -m mypy src/public_log_scrubber
+
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build tools
+        run: python -m pip install --upgrade pip && python -m pip install ".[dev]"
+      - name: Build sdist and wheel
+        run: python -m build --sdist --wheel
+      - name: Install wheel in a clean target
+        run: python -m pip install --target /tmp/log-scrub-wheel dist/*.whl
+      - name: Run installed CLI smoke test
+        run: printf '%s\n' '{"password":"hidden"}' | PYTHONPATH=/tmp/log-scrub-wheel python -m public_log_scrubber --format json
+
+  macos-smoke:
+    name: macOS smoke test
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install package
+        run: python -m pip install --editable .
+      - name: Run CLI smoke test
+        run: printf '%s\n' 'password=hidden' | log-scrub --format text
