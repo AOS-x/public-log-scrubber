@@ -12,14 +12,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
 
+from . import __version__
 from .core import (
     DEFAULT_REPLACEMENT,
     ScrubPolicy,
     ScrubResult,
+    list_rules,
     scrub_json,
     scrub_lines,
     scrub_text,
 )
+from .policy import load_policy
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -78,39 +81,23 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="exit 1 if anything would be redacted, without printing input",
     )
+    parser.add_argument(
+        "--list-rules",
+        action="store_true",
+        help="list built-in detector IDs and exit",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     return parser
 
 
 def _load_policy(path: str | None) -> ScrubPolicy:
     if path is None:
         return ScrubPolicy()
-
-    try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid policy JSON: {exc.msg}") from exc
-
-    if not isinstance(raw, dict):
-        raise TypeError("policy must be a JSON object")
-
-    allowed = {"replacement", "extra_sensitive_keys", "disabled_rules"}
-    unknown = sorted(set(raw) - allowed)
-    if unknown:
-        raise ValueError(f"unknown policy field: {unknown[0]}")
-
-    extra_keys = raw.get("extra_sensitive_keys", ())
-    disabled_rules = raw.get("disabled_rules", ())
-    if not isinstance(extra_keys, (list, tuple)):
-        raise TypeError("extra_sensitive_keys must be a JSON array")
-    if not isinstance(disabled_rules, (list, tuple)):
-        raise TypeError("disabled_rules must be a JSON array")
-
-    replacement = raw.get("replacement", DEFAULT_REPLACEMENT)
-    return ScrubPolicy(
-        replacement=replacement,
-        extra_sensitive_keys=tuple(extra_keys),
-        disabled_rules=tuple(disabled_rules),
-    )
+    return load_policy(path)
 
 
 def _effective_policy(args: argparse.Namespace) -> ScrubPolicy:
@@ -120,6 +107,7 @@ def _effective_policy(args: argparse.Namespace) -> ScrubPolicy:
         replacement=replacement,
         extra_sensitive_keys=base.extra_sensitive_keys + tuple(args.extra_keys),
         disabled_rules=base.disabled_rules,
+        scan_json_strings=base.scan_json_strings,
     )
 
 
@@ -256,6 +244,8 @@ def _validate_paths(args: argparse.Namespace) -> None:
 
 def _write_report(handle: TextIO, replacements: int, counts: dict[str, int]) -> None:
     report = {
+        "schema_version": 1,
+        "tool_version": __version__,
         "replacements": replacements,
         "rule_counts": {rule: counts[rule] for rule in sorted(counts)},
     }
@@ -265,6 +255,10 @@ def _write_report(handle: TextIO, replacements: int, counts: dict[str, int]) -> 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.list_rules:
+        for rule in list_rules():
+            print(f"{rule.rule_id}\t{rule.description}")
+        return 0
     try:
         _validate_paths(args)
         policy = _effective_policy(args)

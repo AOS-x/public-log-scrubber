@@ -69,7 +69,24 @@ log-scrub --format text application.log --output application-safe.log
 
 `--output` refuses to overwrite an existing file unless `--force` is supplied.
 Output files are written through a temporary file and atomically replaced only
-after successful processing.
+after successful processing. When `--output` and `--report` are used together,
+both temporary files are prepared before either replacement begins, but two
+separate filesystem replacements cannot provide one globally atomic transaction.
+
+Before:
+
+~~~text
+request password=synthetic-secret token=ghp_aaaaaaaaaaaaaaaaaaaaaaaa
+~~~
+
+After:
+
+~~~text
+request password=[REDACTED] token=[REDACTED]
+~~~
+
+The replacement marker is idempotent: running the command again leaves this
+sanitized output unchanged and reports zero replacements.
 
 ## Command-line usage
 
@@ -84,6 +101,11 @@ Stream JSON Lines while preserving blank lines and line endings:
 ~~~bash
 log-scrub --format jsonl application.jsonl > application-safe.jsonl
 ~~~
+
+Text and JSONL stdout are streamed. If a later JSONL record is malformed,
+earlier sanitized records may already have been written to stdout; an
+unsanitized record is never emitted. Use `--output` when a failed run must not
+leave a partial destination file.
 
 Check whether a log needs redaction without printing any input or output:
 
@@ -106,6 +128,8 @@ The report has this shape and never contains secret values:
 
 ~~~json
 {
+  "schema_version": 1,
+  "tool_version": "0.3.0",
   "replacements": 2,
   "rule_counts": {
     "json-sensitive-key": 1,
@@ -122,7 +146,8 @@ Use a JSON policy file for repeatable local workflows:
 {
   "replacement": "<REMOVED>",
   "extra_sensitive_keys": ["employee_id", "internal_case_id"],
-  "disabled_rules": []
+  "disabled_rules": [],
+  "scan_json_strings": true
 }
 ~~~
 
@@ -133,6 +158,11 @@ log-scrub --format text --policy scrub-policy.json input.log
 Policy files reject unknown fields, non-string keys, empty replacements, and
 unknown detector IDs. Command-line `--replacement` overrides the policy
 replacement, and repeated `--key` values append to the policy keys.
+
+JSON string values are scanned by default, so a token in a field such as
+`{"message":"failed with ghp_..."}` is also protected. Set
+`"scan_json_strings": false` when a legacy key-only workflow is required.
+Arbitrary regular expressions are intentionally not accepted in policy JSON.
 
 ## Supported detector rules
 
@@ -166,10 +196,15 @@ Disable a rule only when the false-positive trade-off is understood:
 }
 ~~~
 
+When findings overlap, one replacement is emitted and the most specific rule
+gets the count: provider/token rules win over trusted Python detectors, URL
+parameters, and generic assignments. For example, a GitHub token in
+`password=...` is counted as `github-token`, not as an assignment.
+
 ## Python API
 
 ~~~python
-from public_log_scrubber import ScrubPolicy, scrub_json, scrub_text
+from public_log_scrubber import ScrubPolicy, Scrubber, scrub_json, scrub_text
 
 policy = ScrubPolicy(
     replacement="<REMOVED>",
@@ -196,6 +231,77 @@ Existing calls using `extra_keys` and `replacement` remain supported.
 For a streaming library workflow, use `scrub_lines()` with `format="text"` or
 `format="jsonl"`. It yields each scrubbed line lazily.
 
+For repeated calls, prepare one engine so patterns and normalized keys are
+compiled once:
+
+~~~python
+scrubber = Scrubber(policy=policy)
+safe = scrubber.scrub_text("password=hidden")
+for result in scrubber.scrub_lines(log_stream, format="text"):
+    consume(result.value)
+~~~
+
+Trusted local Python detectors can add project-specific spans. They must be
+registered explicitly and must not send log content over the network:
+
+~~~python
+from public_log_scrubber import DetectionSpan, Scrubber
+
+
+class CaseDetector:
+    rule_id = "custom.case-id"
+    description = "synthetic case identifiers"
+
+    def find_spans(self, text):
+        prefix = "CASE-"
+        start = text.find(prefix)
+        if start < 0:
+            return ()
+        end = start + len(prefix) + 6
+        return (DetectionSpan(start, end),)
+
+
+scrubber = Scrubber(detectors=(CaseDetector(),))
+~~~
+
+Detector code is trusted application code. Invalid, empty, out-of-range, or
+overlapping spans are rejected; arbitrary regular expressions are not loaded
+from untrusted policy files.
+
+### Logging integration
+
+The standard-library formatter scrubs the final formatted message, including
+multiline exception text, without changing `LogRecord.msg` or `LogRecord.args`:
+
+~~~python
+import logging
+from public_log_scrubber import ScrubbingFormatter
+
+handler = logging.StreamHandler()
+handler.setFormatter(ScrubbingFormatter("%(levelname)s %(message)s"))
+logging.getLogger().addHandler(handler)
+~~~
+
+If formatting or redaction fails, the formatter emits the fixed
+`[LOG REDACTION FAILED]` marker rather than leaking the original message.
+
+### Pre-commit integration
+
+Add the repository hook to `.pre-commit-config.yaml`:
+
+~~~yaml
+repos:
+  - repo: https://github.com/AOS-x/public-log-scrubber
+    rev: v0.3.0
+    hooks:
+      - id: public-log-scrubber
+~~~
+
+The hook checks filenames supplied by pre-commit and prints only filenames,
+counts, and rule IDs. It returns `0` when clean, `1` when matches are found,
+and `2` for an operational error. A local installation can also invoke
+`log-scrub-pre-commit --policy scrub-policy.json --key employee_id FILE`.
+
 ## Maintenance
 
 AOS-x is the primary maintainer. The project uses focused pull requests,
@@ -213,6 +319,10 @@ specific ways Codex/API credits support it.
 - Security reports should use GitHub Private Vulnerability Reporting, not a
   public issue.
 
+The default profile intentionally excludes broad PII detection, arbitrary
+regex policy files, archive contents, and recursive directory processing.
+Those are separate policy and usability decisions, not implied guarantees.
+
 ## Development
 
 ~~~bash
@@ -222,7 +332,13 @@ python -m ruff format --check .
 python -m ruff check .
 python -m mypy src/public_log_scrubber
 python -m build --sdist --wheel
+python -m pre_commit validate-manifest .pre-commit-hooks.yaml
+python benchmarks/benchmark_streaming.py --lines 50000
 ~~~
+
+The benchmark is informational only. It compares per-call compatibility
+wrappers with a reusable prepared engine and does not impose a fragile timing
+threshold in CI.
 
 When adding a detector, use synthetic values only. Never commit a real
 credential, personal identifier, or customer log.

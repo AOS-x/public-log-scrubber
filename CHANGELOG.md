@@ -5,6 +5,27 @@ All notable changes to this project are documented here.
 The format follows the principles of Keep a Changelog, and releases use
 semantic versioning.
 
+## [0.3.0] - 2026-08-02
+
+### Added
+
+- Reusable `Scrubber`, value-free `DetectionSpan`, trusted Python detector
+  protocol, stable `RuleInfo` metadata, `list_rules()`, and `--list-rules`.
+- JSON string scanning by default with a `scan_json_strings` compatibility
+  opt-out.
+- Standard-library `ScrubbingFormatter` with fail-closed behavior.
+- `log-scrub-pre-commit` and the repository pre-commit hook manifest.
+- `load_policy()`, `py.typed`, report schema/version fields, and `--version`.
+
+### Changed
+
+- Prepared engines compile shared patterns and normalized keys once per
+  operation, then resolve overlapping findings by detector specificity.
+- Provider/token-specific findings receive attribution over generic assignment
+  findings, while replacement counts remain internally consistent.
+- Documentation now covers integrations, idempotency, JSON string scanning,
+  trusted custom detectors, and the threat-model boundaries.
+
 ## [0.2.1] - 2026-08-02
 
 ### Fixed

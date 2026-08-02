@@ -17,9 +17,9 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package
@@ -34,9 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3.13"
       - name: Install development tools
@@ -53,31 +53,56 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3.13"
       - name: Install build tools
         run: python -m pip install --upgrade pip && python -m pip install ".[dev]"
       - name: Build sdist and wheel
         run: python -m build --sdist --wheel
-      - name: Install wheel in a clean target
-        run: python -m pip install --target /tmp/log-scrub-wheel dist/*.whl
-      - name: Run installed CLI smoke test
-        run: printf '%s\n' '{"password":"hidden"}' | PYTHONPATH=/tmp/log-scrub-wheel python -m public_log_scrubber --format json
+      - name: Install wheel in a clean environment
+        run: |
+          python -m venv /tmp/log-scrub-wheel-env
+          /tmp/log-scrub-wheel-env/bin/python -m pip install dist/*.whl
+      - name: Inspect wheel and run installed smoke tests
+        run: |
+          test -f /tmp/log-scrub-wheel-env/lib/python*/site-packages/public_log_scrubber/py.typed
+          printf '%s\n' '{"password":"hidden"}' | /tmp/log-scrub-wheel-env/bin/log-scrub --format json
+          /tmp/log-scrub-wheel-env/bin/log-scrub --version
+          /tmp/log-scrub-wheel-env/bin/log-scrub --list-rules
+          /tmp/log-scrub-wheel-env/bin/log-scrub-pre-commit --help
+      - name: Validate pre-commit manifest
+        run: python -m pre_commit validate-manifest .pre-commit-hooks.yaml
 
   macos-smoke:
     name: macOS smoke test
     runs-on: macos-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3.13"
       - name: Install package
         run: python -m pip install --editable .
       - name: Run CLI smoke test
+        run: printf '%s\n' 'password=hidden' | log-scrub --format text
+
+  windows-smoke:
+    name: Windows smoke test
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+      - name: Install package
+        run: python -m pip install .
+      - name: Run CLI smoke test
+        shell: bash
         run: printf '%s\n' 'password=hidden' | log-scrub --format text

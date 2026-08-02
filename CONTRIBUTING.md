@@ -12,6 +12,10 @@ Thanks for helping make shared logs safer.
 - Run `python -m ruff format --check .`, `python -m ruff check .`, and
   `python -m mypy src/public_log_scrubber` when development dependencies are
   installed.
+- Run `python -m pre_commit validate-manifest .pre-commit-hooks.yaml` and
+  verify that pre-commit output contains no matching lines or values.
+- Exercise `ScrubbingFormatter` and `log-scrub-pre-commit` with synthetic
+  messages before changing integration behavior.
 
 ## Pull requests
 

@@ -22,6 +22,47 @@ class CliTests(unittest.TestCase):
             {"password": "[REDACTED]", "message": "hello"},
         )
 
+    def test_list_rules_is_safe_and_does_not_read_stdin(self):
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout), patch("sys.stdin", io.StringIO("")):
+            exit_code = main(["--list-rules"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("github-token", stdout.getvalue())
+        self.assertIn("json-sensitive-key", stdout.getvalue())
+
+    def test_report_includes_schema_and_tool_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with (
+                patch("sys.stdin", io.StringIO("password=hidden\n")),
+                patch("sys.stdout", io.StringIO()),
+            ):
+                exit_code = main(["--format", "text", "--report", str(report)])
+
+            value = json.loads(report.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(value["schema_version"], 1)
+        self.assertEqual(value["tool_version"], "0.3.0")
+
+    def test_policy_can_disable_json_string_scanning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = Path(directory) / "policy.json"
+            policy.write_text(
+                json.dumps({"scan_json_strings": False}), encoding="utf-8"
+            )
+            stdout = io.StringIO()
+            token = "ghp_" + "a" * 24
+            with (
+                patch("sys.stdin", io.StringIO(json.dumps({"message": token}))),
+                patch("sys.stdout", stdout),
+            ):
+                exit_code = main(["--format", "json", "--policy", str(policy)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn(token, stdout.getvalue())
+
     def test_jsonl_preserves_blank_lines(self):
         source = '{"token":"hidden"}\n\n{"ok":true}\n'
         stdout = io.StringIO()
@@ -140,7 +181,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "safe.log"
             output.write_text("old", encoding="utf-8")
-            with patch("sys.stdin", io.StringIO("password=hidden\n")):
+            with (
+                patch("sys.stdin", io.StringIO("password=hidden\n")),
+                patch("sys.stdout", io.StringIO()),
+            ):
                 exit_code = main(
                     ["--format", "text", "--output", str(output), "--force"]
                 )
