@@ -3,6 +3,8 @@ import unittest
 from public_log_scrubber import (
     DEFAULT_REPLACEMENT,
     KNOWN_RULE_IDS,
+    DetectionSpan,
+    Scrubber,
     ScrubPolicy,
     is_sensitive_key,
     scrub_json,
@@ -48,6 +50,41 @@ class ScrubJsonTests(unittest.TestCase):
         self.assertEqual(result.value, value)
         self.assertEqual(result.replacements, 0)
 
+    def test_unicode_custom_keys_only_redact_the_configured_key(self):
+        value = {"كلمة_المرور": "hidden", "الاسم": "keep", "名": "keep"}
+        result = scrub_json(value, extra_keys=["كلمة_المرور"])
+        self.assertEqual(result.value["كلمة_المرور"], DEFAULT_REPLACEMENT)
+        self.assertEqual(result.value["الاسم"], "keep")
+        self.assertEqual(result.value["名"], "keep")
+        self.assertEqual(result.replacements, 1)
+
+    def test_nfkc_casefold_handles_accented_and_full_width_keys(self):
+        value = {
+            "État": "configured",
+            "état": "same-normalized-key",
+            "Ｆｕｌｌｗｉｄｔｈ": "configured-too",
+            "普通话": "keep",
+        }
+        result = scrub_json(
+            value,
+            extra_keys=(
+                "état",
+                "fullwidth",
+            ),
+        )
+
+        self.assertEqual(result.value["État"], DEFAULT_REPLACEMENT)
+        self.assertEqual(result.value["état"], DEFAULT_REPLACEMENT)
+        self.assertEqual(result.value["Ｆｕｌｌｗｉｄｔｈ"], DEFAULT_REPLACEMENT)
+        self.assertEqual(result.value["普通话"], "keep")
+        self.assertEqual(result.replacements, 3)
+
+    def test_punctuation_only_custom_keys_are_rejected(self):
+        with self.assertRaises(ValueError):
+            ScrubPolicy(extra_sensitive_keys=("!!!",))
+        with self.assertRaises(ValueError):
+            scrub_text("!!!=hidden", extra_keys=("!!!",))
+
 
 class ScrubTextTests(unittest.TestCase):
     def test_common_assignments_and_tokens_are_replaced(self):
@@ -74,6 +111,13 @@ class ScrubTextTests(unittest.TestCase):
         )
         self.assertEqual(result.value, "employee_id=[REDACTED] message=keep")
         self.assertEqual(result.replacements, 1)
+
+    def test_assignments_preserve_quotes_and_punctuation(self):
+        result = scrub_text('password="hidden", next=ok; token=keep')
+        self.assertEqual(
+            result.value,
+            'password="[REDACTED]", next=ok; token=[REDACTED]',
+        )
 
     def test_url_query_parameters_preserve_other_parameters(self):
         result = scrub_text(
@@ -138,6 +182,155 @@ class ScrubTextTests(unittest.TestCase):
         replacement = r"\\1-$&"
         result = scrub_text("password=hidden", replacement=replacement)
         self.assertEqual(result.value, f"password={replacement}")
+
+    def test_scrubbing_is_idempotent(self):
+        samples = (
+            "password=hidden",
+            "Authorization: Bearer abcdefgh",
+            "GET /events?token=hidden&next=ok",
+            'password="hidden"',
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                first = scrub_text(sample)
+                second = scrub_text(first.value)
+                self.assertEqual(second.value, first.value)
+                self.assertEqual(second.replacements, 0)
+                self.assertEqual(dict(second.rule_counts), {})
+
+    def test_idempotency_covers_json_jsonl_and_custom_replacements(self):
+        policy = ScrubPolicy(
+            replacement=r"\\safe-$1",
+            extra_sensitive_keys=("employee_id",),
+        )
+        first_json = scrub_json(
+            {
+                "employee_id": "synthetic-id",
+                "message": "https://example.test/?employee_id=synthetic-id",
+            },
+            policy=policy,
+        )
+        second_json = scrub_json(first_json.value, policy=policy)
+        self.assertEqual(second_json.value, first_json.value)
+        self.assertEqual(second_json.replacements, 0)
+        self.assertEqual(dict(second_json.rule_counts), {})
+
+        first_lines = list(
+            scrub_lines(
+                ['{"message":"ghp_aaaaaaaaaaaaaaaaaaaaaaaa"}\n'],
+                format="jsonl",
+                policy=policy,
+            )
+        )
+        second_lines = list(
+            scrub_lines(
+                (result.value for result in first_lines),
+                format="jsonl",
+                policy=policy,
+            )
+        )
+        self.assertEqual(second_lines[0].value, first_lines[0].value)
+        self.assertEqual(second_lines[0].replacements, 0)
+
+    def test_specific_detector_wins_over_assignment_without_losing_context(self):
+        token = "ghp_" + "a" * 24
+        result = scrub_text(f"password={token}")
+        self.assertEqual(result.value, "password=[REDACTED]")
+        self.assertEqual(dict(result.rule_counts), {"github-token": 1})
+        self.assertEqual(sum(result.rule_counts.values()), result.replacements)
+
+    def test_json_string_values_are_scanned_by_default(self):
+        token = "ghp_" + "a" * 24
+        result = scrub_json({"message": f"failed with {token}"})
+        self.assertEqual(result.value, {"message": "failed with [REDACTED]"})
+        self.assertEqual(dict(result.rule_counts), {"github-token": 1})
+
+    def test_json_string_scanning_can_be_disabled(self):
+        token = "ghp_" + "a" * 24
+        result = scrub_json(
+            {"message": f"failed with {token}"},
+            policy=ScrubPolicy(scan_json_strings=False),
+        )
+        self.assertIn(token, result.value["message"])
+        self.assertEqual(result.replacements, 0)
+
+    def test_prepared_scrubber_reuses_one_engine_for_streaming(self):
+        scrubber = Scrubber()
+        results = list(
+            scrubber.scrub_lines(("password=hidden\n" for _ in range(3)), format="text")
+        )
+        self.assertEqual([result.replacements for result in results], [1, 1, 1])
+
+    def test_custom_detector_spans_are_replaced_without_exposing_values(self):
+        class CaseDetector:
+            rule_id = "custom.case-id"
+            description = "synthetic case identifiers"
+
+            def find_spans(self, text):
+                start = text.find("CASE-")
+                return (
+                    ()
+                    if start < 0
+                    else (DetectionSpan(start, start + len("CASE-123456")),)
+                )
+
+        result = Scrubber(detectors=(CaseDetector(),)).scrub_text(
+            "case CASE-123456 message=ok"
+        )
+        self.assertEqual(result.value, "case [REDACTED] message=ok")
+        self.assertEqual(dict(result.rule_counts), {"custom.case-id": 1})
+
+    def test_custom_detector_ids_and_spans_are_validated(self):
+        class BadId:
+            rule_id = "case-id"
+            description = "bad"
+
+            def find_spans(self, text):
+                return ()
+
+        class BadSpan:
+            rule_id = "custom.bad-span"
+            description = "bad"
+
+            def find_spans(self, text):
+                return (DetectionSpan(0, len(text) + 1),)
+
+        with self.assertRaises(ValueError):
+            Scrubber(detectors=(BadId(),))
+        scrubber = Scrubber(detectors=(BadSpan(),))
+        with self.assertRaises(ValueError):
+            scrubber.scrub_text("secret")
+
+        class DuplicateId:
+            rule_id = "custom.bad-span"
+            description = "duplicate"
+
+            def find_spans(self, text):
+                return ()
+
+        with self.assertRaises(ValueError):
+            Scrubber(detectors=(BadSpan(), DuplicateId()))
+
+        class Overlapping:
+            rule_id = "custom.overlap"
+            description = "overlap"
+
+            def find_spans(self, text):
+                return (DetectionSpan(0, 2), DetectionSpan(1, 3))
+
+        with self.assertRaises(ValueError):
+            Scrubber(detectors=(Overlapping(),)).scrub_text("abcd")
+
+    def test_cycles_fail_safely_without_serializing_input(self):
+        value = []
+        value.append(value)
+
+        with self.assertRaisesRegex(ValueError, "cyclic"):
+            scrub_json(value)
+
+    def test_invalid_policy_type_is_rejected(self):
+        with self.assertRaises(TypeError):
+            scrub_text("password=hidden", policy="not-a-policy")  # type: ignore[arg-type]
 
     def test_policy_rejects_unknown_rules_and_non_string_keys(self):
         with self.assertRaises((ValueError, TypeError)):

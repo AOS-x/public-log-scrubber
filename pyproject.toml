@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "public-log-scrubber"
-version = "0.2.0"
+version = "0.3.0"
 description = "Scrub high-confidence credentials from logs before sharing them."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,18 +24,30 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
 ]
 
+[project.urls]
+Source = "https://github.com/AOS-x/public-log-scrubber"
+Issues = "https://github.com/AOS-x/public-log-scrubber/issues"
+Changelog = "https://github.com/AOS-x/public-log-scrubber/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/AOS-x/public-log-scrubber#readme"
+Security = "https://github.com/AOS-x/public-log-scrubber/security/advisories/new"
+
 [project.scripts]
 log-scrub = "public_log_scrubber.cli:main"
+log-scrub-pre-commit = "public_log_scrubber.precommit:main"
 
 [project.optional-dependencies]
 dev = [
   "build>=1.2",
-  "mypy>=1.13",
+  "mypy>=1.13,<2",
+  "pre-commit>=3",
   "ruff>=0.8",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+public_log_scrubber = ["py.typed"]
 
 [tool.ruff]
 target-version = "py39"

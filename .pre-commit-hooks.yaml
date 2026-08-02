@@ -1,0 +1,7 @@
+- id: public-log-scrubber
+  name: Check files for shareable-log credentials
+  description: Detect high-confidence credentials without printing file contents
+  entry: log-scrub-pre-commit
+  language: python
+  types: [text]
+  require_serial: true

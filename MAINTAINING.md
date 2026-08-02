@@ -16,6 +16,8 @@ small by design so reviews, security fixes, and releases can remain responsive.
   release.
 - Publish release notes with detector changes, compatibility notes, and known
   limitations.
+- Exercise the logging formatter and pre-commit hook with synthetic fixtures;
+  these integrations must remain fail-closed and local-only.
 
 ## Security handling
 
@@ -34,8 +36,24 @@ log. Add a synthetic regression test after the fix is understood.
 6. The release workflow builds an sdist and wheel, attests provenance, and
    publishes through the PyPI trusted publisher.
 
+For v0.2.1, release only reliability fixes. For v0.3.0, also verify the
+prepared `Scrubber`, JSON string scanning, custom-detector validation, logging
+formatter, pre-commit hook, `py.typed`, and `--list-rules`/`--version` smoke
+tests. Do not close the PyPI publication issue until the public package page
+and a clean installation have both been checked.
+
 The first PyPI release also requires configuring the `pypi` GitHub environment
 and trusted publisher in the PyPI project settings.
+
+## Pilot feedback and adoption
+
+Invite users to a public pilot-feedback issue and request only synthetic
+examples, operating-system/Python information, approximate file size, and safe
+rule counts. Do not request private logs or credentials. Record an adopter,
+integration, download metric, or testimonial only with permission and a
+verifiable public link; never manufacture users, downloads, or historical
+maintenance activity. A v0.3.1 should be driven by real feedback and not by a
+calendar target.
 
 ## How Codex/API credits help
 
