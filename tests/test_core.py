@@ -76,6 +76,16 @@ class ScrubTextTests(unittest.TestCase):
         self.assertEqual(result.value, "employee_id=[REDACTED] message=keep")
         self.assertEqual(result.replacements, 1)
 
+    def test_url_query_parameters_preserve_other_parameters(self):
+        result = scrub_text(
+            "GET /events?access_token=private-value&next=page-2 HTTP/1.1"
+        )
+        self.assertEqual(
+            result.value,
+            "GET /events?access_token=[REDACTED]&next=page-2 HTTP/1.1",
+        )
+        self.assertEqual(result.replacements, 1)
+
     def test_unrelated_text_is_not_changed(self):
         text = "status=ok message=hello world"
         result = scrub_text(text)

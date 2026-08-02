@@ -48,12 +48,16 @@ _GITHUB_FINE_GRAINED_TOKEN_RE = re.compile(
 _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}")
 _BASIC_RE = re.compile(r"(?i)(\bBasic\s+)[A-Za-z0-9+/]{8,}={0,2}")
+_URL_PARAMETER_RE = re.compile(
+    r"(?i)([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"password|secret|token)=)([^&#\s]+)"
+)
 
 _ASSIGNMENT_VALUE = (
-    r'(?:"[^"]*"|\'[^\']*\'|(?:Bearer|Basic)\s+\S+|[^\s,;}\]]+)'
+    r'(?:"[^"]*"|\'[^\']*\'|(?:Bearer|Basic)\s+\S+|[^\s,;}\]&#]+)'
 )
 _DEFAULT_ASSIGNMENT_RE = re.compile(
-    r"(?P<key>\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|"
+    r"(?P<key>(?<![?&])\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|"
     r"authorization|cookie|password|passwd|private[_ -]?key|secret|"
     r"session(?:[_ -]?id)?|set[_ -]?cookie|token)\b\s*[:=]\s*)"
     rf"(?P<value>{_ASSIGNMENT_VALUE})",
@@ -178,6 +182,12 @@ def scrub_text(
 
     scrubbed = text
     replacements = 0
+
+    scrubbed, count = _URL_PARAMETER_RE.subn(
+        rf"\1{replacement}",
+        scrubbed,
+    )
+    replacements += count
 
     scrubbed, count = _DEFAULT_ASSIGNMENT_RE.subn(
         lambda match: _replace_assignment(match, replacement),
